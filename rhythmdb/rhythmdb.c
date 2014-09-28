@@ -1495,12 +1495,21 @@ process_changed_entries_cb (RhythmDBEntry *entry,
 	return TRUE;
 }
 
+typedef struct {
+	RhythmDB *db;
+	RhythmDBProgressFunc on_progress;
+	gpointer on_progress_data;
+	guint total;
+	guint current;
+} RhythmDBProgressData;
+
 static void
 sync_entry_changed (RhythmDBEntry *entry,
 		    GSList *changes,
-		    RhythmDB *db)
+		    RhythmDBProgressData *pd)
 {
 	GSList *t;
+	GError *err = NULL;
 
 	for (t = changes; t; t = t->next) {
 		RBMetaDataField field;
@@ -1511,6 +1520,9 @@ sync_entry_changed (RhythmDBEntry *entry,
 
 			if (!rhythmdb_entry_can_sync_metadata (entry)) {
 				g_warning ("trying to sync properties of non-editable file");
+				if (pd->on_progress)
+					err = g_error_new (RHYTHMDB_ERROR, RHYTHMDB_ERROR_ENTRY_SYNC_FAILED,
+						_("Can't sync metadata for %s"), rb_refstring_get(entry->title));
 				break;
 			}
 
@@ -1518,22 +1530,33 @@ sync_entry_changed (RhythmDBEntry *entry,
 			action->type = RHYTHMDB_ACTION_SYNC;
 			action->uri = rb_refstring_ref (entry->location);
 			action->data.changes = copy_entry_changes (changes);
-			g_async_queue_push (db->priv->action_queue, action);
+			g_async_queue_push (pd->db->priv->action_queue, action);
 			break;
 		}
 	}
-}
 
+	if (pd->on_progress)
+		pd->on_progress (pd->total, pd->current++, err, pd->on_progress_data);
+}
 
 static void
 rhythmdb_commit_internal (RhythmDB *db,
 			  gboolean sync_changes,
-			  GThread *thread)
+			  GThread *thread,
+			  RhythmDBProgressFunc on_sync_progress,
+			  gpointer on_sync_progress_data)
 {
 	g_mutex_lock (&db->priv->change_mutex);
 
 	if (sync_changes) {
-		g_hash_table_foreach (db->priv->changed_entries, (GHFunc) sync_entry_changed, db);
+		RhythmDBProgressData pd = {
+			.db = db,
+			.on_progress = on_sync_progress,
+			.on_progress_data = on_sync_progress_data,
+			.total = g_hash_table_size (db->priv->changed_entries),
+			.current = 0
+		};
+		g_hash_table_foreach (db->priv->changed_entries, (GHFunc) sync_entry_changed, &pd);
 	}
 
 	/* update the sets of entry changed/added/deleted signals to emit */
@@ -1559,7 +1582,7 @@ typedef struct {
 static gboolean
 timeout_rhythmdb_commit (RhythmDBTimeoutCommitData *data)
 {
-	rhythmdb_commit_internal (data->db, data->sync, data->thread);
+	rhythmdb_commit_internal (data->db, data->sync, data->thread, NULL, NULL);
 	g_object_unref (data->db);
 	g_free (data);
 	return FALSE;
@@ -1591,7 +1614,38 @@ rhythmdb_add_timeout_commit (RhythmDB *db,
 void
 rhythmdb_commit (RhythmDB *db)
 {
-	rhythmdb_commit_internal (db, TRUE, g_thread_self ());
+	rhythmdb_commit_internal (db, TRUE, g_thread_self (), NULL, NULL);
+}
+
+typedef struct {
+	RhythmDB *db;
+	RhythmDBProgressFunc on_progress;
+	gpointer on_progress_data;
+} RhythmDBCommitAsyncData;
+
+static void
+rhythmdb_commit_async_threadfunc (RhythmDBCommitAsyncData *data)
+{
+	rhythmdb_commit_internal (data->db, TRUE, g_thread_self (), data->on_progress, data->on_progress_data);
+	g_slice_free (RhythmDBCommitAsyncData, data);
+}
+
+/**
+ * rhythmdb_commit_async:
+ * @db: a #RhythmDB
+ * @entry_count: if not null, a pointer to a guint to be updated with the number of entries
+ * @on_progress: if not null, a function to be called each time an entry is processed.
+ *
+ * Like rhythmdb_commit(), only async and notifies of progress along the way.
+ */
+void
+rhythmdb_commit_async (RhythmDB *db, RhythmDBProgressFunc on_progress, gpointer on_progress_data)
+{
+	RhythmDBCommitAsyncData *data = g_slice_new (RhythmDBCommitAsyncData);
+	data->db = db;
+	data->on_progress = on_progress;
+	data->on_progress_data = on_progress_data;
+	g_thread_new ("rhythmdb-commit-async-thread", (GThreadFunc) rhythmdb_commit_async_threadfunc, data);
 }
 
 /**
@@ -2498,7 +2552,7 @@ rhythmdb_process_metadata_load (RhythmDB *db, RhythmDBEvent *event)
 	if (monitor && event->entry_type == RHYTHMDB_ENTRY_TYPE_SONG)
 		rhythmdb_monitor_uri_path (db, rb_refstring_get (entry->location), NULL);
 
-	rhythmdb_commit_internal (db, FALSE, g_thread_self ());
+	rhythmdb_commit_internal (db, FALSE, g_thread_self (), NULL, NULL);
 
 	return TRUE;
 }

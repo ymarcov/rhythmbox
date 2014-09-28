@@ -233,6 +233,7 @@ RhythmDBEntryType *rhythmdb_entry_get_entry_type (RhythmDBEntry *entry);
 typedef enum
 {
 	RHYTHMDB_ERROR_ACCESS_FAILED,
+	RHYTHMDB_ERROR_ENTRY_SYNC_FAILED
 } RhythmDBError;
 
 #define RHYTHMDB_ERROR (rhythmdb_error_quark ())
@@ -330,6 +331,9 @@ void		rhythmdb_save_async	(RhythmDB *db);
 void		rhythmdb_start_action_thread	(RhythmDB *db);
 
 void		rhythmdb_commit		(RhythmDB *db);
+typedef void (*RhythmDBProgressFunc) (guint total, guint current, GError*, gpointer data);
+void		rhythmdb_commit_async	(RhythmDB *db, RhythmDBProgressFunc callback, gpointer data);
+
 
 RhythmDBEntry *	rhythmdb_entry_new	(RhythmDB *db, RhythmDBEntryType *type, const char *uri);
 RhythmDBEntry *	rhythmdb_entry_example_new	(RhythmDB *db, RhythmDBEntryType *type, const char *uri);
