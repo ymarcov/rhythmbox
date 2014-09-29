@@ -46,6 +46,7 @@
 #include "rhythmdb.h"
 #include "rhythmdb-property-model.h"
 #include "rb-song-info.h"
+#include "rb-alert-dialog.h"
 #include "rb-builder-helpers.h"
 #include "rb-dialog.h"
 #include "rb-rating.h"
@@ -1649,6 +1650,60 @@ sync_ulong_property_multiple (RBSongInfo *dialog, RhythmDBPropType property, Gtk
 	return changed;
 }
 
+typedef struct {
+	GList *errors;
+} RBSongInfoSyncMultipleProgressData;
+
+static gboolean
+rb_song_info_sync_entries_multiple_notify_result (RBSongInfoSyncMultipleProgressData *smpd)
+{
+	if (smpd->errors) {
+		GList *err_list = smpd->errors;
+		GError *err = (GError*) err_list->data;
+		gchar *errors_str = err ? g_strdup (err->message) : NULL;
+
+		if (errors_str) {
+			while (err_list->next) {
+				err_list = err_list->next;
+				err = (GError*) err_list->data;
+				gchar *tmp = errors_str;
+				errors_str = g_strconcat (errors_str, "\n", err->message, NULL);
+				g_free (tmp);
+			}
+		}
+
+		GtkWidget *dialog = rb_alert_dialog_new (NULL,
+				GTK_DIALOG_MODAL,
+				GTK_MESSAGE_ERROR,
+				GTK_BUTTONS_OK,
+				_("Errors occurred during sync operation"),
+				errors_str ? errors_str : _("Failed to get extra details"));
+		g_signal_connect_swapped (dialog, "response", G_CALLBACK (gtk_widget_destroy), dialog);
+		gtk_widget_show (dialog);
+		g_free (errors_str);
+	}
+
+	g_list_free_full (smpd->errors, (GDestroyNotify) g_error_free);
+	g_slice_free (RBSongInfoSyncMultipleProgressData, smpd);
+
+	return FALSE;
+}
+
+static void
+rb_song_info_sync_entries_multiple_progress (guint total,
+		guint current,
+		GError *err,
+		RBSongInfoSyncMultipleProgressData *smpd)
+{
+	if (err)
+		smpd->errors = g_list_prepend (smpd->errors, err);
+
+	if (current + 1 == total) {
+		smpd->errors = g_list_reverse (smpd->errors);
+		g_idle_add ((GSourceFunc) rb_song_info_sync_entries_multiple_notify_result, smpd);
+	}
+}
+
 static void
 rb_song_info_sync_entries_multiple (RBSongInfo *dialog)
 {
@@ -1701,8 +1756,12 @@ rb_song_info_sync_entries_multiple (RBSongInfo *dialog)
 	changed |= sync_ulong_property_multiple (dialog, RHYTHMDB_PROP_DISC_NUMBER, dialog->priv->disc_cur);
 	changed |= sync_ulong_property_multiple (dialog, RHYTHMDB_PROP_DISC_TOTAL, dialog->priv->disc_total);
 
-	if (changed)
-		rhythmdb_commit (dialog->priv->db);
+	if (changed) {
+		RBSongInfoSyncMultipleProgressData *smpd = g_slice_new0 (RBSongInfoSyncMultipleProgressData);
+		rhythmdb_commit_async (dialog->priv->db,
+					(RhythmDBProgressFunc) rb_song_info_sync_entries_multiple_progress,
+					smpd);
+	}
 }
 
 static gboolean
